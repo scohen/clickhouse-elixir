@@ -1,10 +1,14 @@
 defmodule Clickhouse.Binary do
   use Bitwise
 
+  # XXX: varint does not handle negative numbers properly
   def encode(:varint, num) when num < 128, do: <<num>>
   def encode(:varint, num), do: <<1::1, num::7, encode(:varint, num >>> 7)::binary>>
 
-  def encode(:string, str) when is_bitstring(str) do
+  def encode(:varuint, num) when num < 128, do: <<num>>
+  def encode(:varuint, num), do: <<1::1, num::7, encode(:varuint, num >>> 7)::binary>>
+
+  def encode(:string, str) when is_bitstring(str) do # XXX: is_binary instead? not all bitstrings are binaries
     [encode(:varint, byte_size(str)), str]
   end
 

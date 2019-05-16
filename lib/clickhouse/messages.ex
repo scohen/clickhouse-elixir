@@ -35,6 +35,7 @@ defmodule Clickhouse.Messages do
       alias Clickhouse.ClientInfo
       alias Clickhouse.Binary
       alias Clickhouse.Protocol
+      alias Clickhouse.Settings
       require Protocol.Client
 
       def encode(query, client_info, settings, compression, query_id \\ "") do
@@ -60,8 +61,9 @@ defmodule Clickhouse.Messages do
         server_version_major: :varint,
         server_version_minor: :varint,
         server_revision: :varint,
-        server_timezone: :string,
-        server_display_name: :string
+        server_timezone: :string,      # >= 54058
+        server_display_name: :string,  # >= 54372
+        server_version_patch: :varint  # >= 54401
     end
 
     defmodule Exception do
