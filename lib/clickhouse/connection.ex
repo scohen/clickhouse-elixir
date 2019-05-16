@@ -91,13 +91,19 @@ defmodule Clickhouse.Connection do
       IO.inspect(unprocessed_bytes, label: "remainder")
 
       case receive_packet(conn, &Messages.Server.decode/1, unprocessed_bytes) do
+        {:ok, %Messages.Server.EndOfStream{}, rest} ->
+          {:halt, rest}
+
         {:ok, message, rest} ->
+          IO.inspect(message, label: "emitting")
           {[message], rest}
 
         {:error, :incomplete} ->
+          IO.inspect("incomplete")
           {[], unprocessed_bytes}
 
         {:error, :timeout} ->
+          IO.inspect("timeout")
           {:halt, unprocessed_bytes}
       end
     end
@@ -108,7 +114,7 @@ defmodule Clickhouse.Connection do
 
     messages =
       Enum.to_list(stream)
-      |> IO.inspect()
+      |> IO.inspect(label: "messages")
 
     {:ok, query, nil, state}
   end
@@ -159,20 +165,26 @@ defmodule Clickhouse.Connection do
   end
 
   defp receive_packet(conn, decode_fn, acc) do
-    case :gen_tcp.recv(conn, 0, 20) do
-      {:ok, data} ->
-        all_data = acc <> data
+    case decode_fn.(acc) do
+      {:ok, message, remainder} = success ->
+        success
 
-        case decode_fn.(all_data) do
-          {:ok, _message, _buffer} = success ->
-            success
+      {:error, :incomplete} ->
+        case :gen_tcp.recv(conn, 0) do
+          {:ok, data} ->
+            all_data = acc <> data
 
-          {:error, :incomplete} ->
-            receive_packet(conn, decode_fn, all_data)
+            case decode_fn.(all_data) do
+              {:ok, _message, _buffer} = success ->
+                success
+
+              {:error, :incomplete} ->
+                receive_packet(conn, decode_fn, all_data)
+            end
+
+          {:error, :timeout} = err ->
+            err
         end
-
-      {:error, :timeout} = err ->
-        err
     end
   end
 end

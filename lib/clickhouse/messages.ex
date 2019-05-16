@@ -299,6 +299,7 @@ defmodule Clickhouse.Messages do
     end
 
     def decode(<<profile_info(), rest::binary>>) do
+      IO.puts("PROF INFO")
       Messages.Server.ProfileInfo.decode(rest)
     end
 
@@ -307,7 +308,12 @@ defmodule Clickhouse.Messages do
     end
 
     def decode(<<end_of_stream(), rest::binary>>) do
+      IO.puts("ENDO OF STREAM")
       {:ok, %Messages.Server.EndOfStream{}, rest}
+    end
+
+    def decode(<<progress(), rest::binary>>) do
+      Messages.Server.Progress.decode(rest)
     end
 
     def decode(_), do: {:error, :incomplete}
