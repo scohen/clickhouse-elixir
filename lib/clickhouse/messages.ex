@@ -106,11 +106,8 @@ defmodule Clickhouse.Messages do
 
     defmodule Data do
       @compile {:bin_opt_info, true}
-      alias Clickhouse.BlockInfo
       alias Clickhouse.Binary
-
       use Bitwise
-      use Clickhouse.ColumnMacros
 
       defstruct data: [],
                 block_info: nil,
@@ -118,159 +115,48 @@ defmodule Clickhouse.Messages do
                 column_count: 0,
                 column_meta: %{}
 
+      @type_map %{
+        "String" => :string,
+        "Date" => :date,
+        "DateTime" => :datetime,
+        "Float32" => :f32,
+        "Float64" => :f64,
+        "Int8" => :i8,
+        "Int16" => :i16,
+        "Int32" => :i32,
+        "Int64" => :i64,
+        "UInt8" => :u8,
+        "UInt16" => :u16,
+        "UInt32" => :u32,
+        "UInt64" => :u64
+      }
+
       def decode(<<rest::binary>>) do
-        {:ok, x, rest} = Binary.decode(rest, :string)
-        IO.inspect(rest, label: "start")
-        decode_block_info_field(rest, [])
+        {:ok, _temporary_table, rest} = Binary.decode(rest, :string)
+        rest = strip_block_info(rest)
+        {:ok, column_count, rest} = Binary.decode(rest, :varint)
+        {:ok, row_count, rest} = Binary.decode(rest, :varint)
+        {:ok, data, rest} = decode_columns(rest, row_count, column_count, [])
       end
 
-      def decode_block_info_field(<<0::size(1), 1::size(7), rest::binary>>, accum) do
-        decode_is_overflow(rest, accum)
+      defp strip_block_info(<<0, rest::binary>>), do: rest
+      defp strip_block_info(<<1, _::size(8), rest::binary>>), do: strip_block_info(rest)
+      defp strip_block_info(<<2, _::size(32), rest::binary>>), do: strip_block_info(rest)
+
+      defp decode_columns(rest, _row_count, 0, data), do: {:ok, Enum.reverse(data), rest}
+
+      defp decode_columns(rest, row_count, n, data) do
+        {:ok, name, rest} = Binary.decode(rest, :string)
+        {:ok, type, rest} = Binary.decode(rest, :string)
+        {:ok, values, rest} = read_column(type, row_count, rest, [])
+        decode_columns(rest, row_count, n - 1, [{name, type, values} | data])
       end
 
-      def decode_block_info_field(<<0::size(1), 2::size(7), rest::binary>>, accum) do
-        decode_bucket_num(rest, accum)
-      end
+      defp read_column(_type, 0, rest, values), do: {:ok, Enum.reverse(values), rest}
 
-      def decode_block_info_field(<<_unused::size(8), rest::binary>>, accum) do
-        decode_column_count(rest, 0, 0, fix_up_block_info(accum))
-      end
-
-      def decode_bucket_num(<<bucket_num::little-signed-size(32), rest::binary>>, accum) do
-        decode_block_info_field(rest, [{:bucket_num, bucket_num} | accum])
-      end
-
-      def decode_is_overflow(<<0::little-unsigned-size(8), rest::binary>>, accum) do
-        decode_block_info_field(rest, [{:is_overflow, false} | accum])
-      end
-
-      def decode_is_overflow(<<1::little-unsigned-size(8), rest::binary>>, accum) do
-        decode_block_info_field(rest, [{:is_overflow, true} | accum])
-      end
-
-      # Data decoding
-
-      def decode_column_count(
-            <<0::size(1), val::size(7), rest::binary>>,
-            count,
-            shift,
-            %__MODULE__{} = data
-          ) do
-        count = count ||| val <<< shift
-        decode_row_count(rest, 0, 0, %{data | column_count: count})
-      end
-
-      def decode_column_count(
-            <<1::size(1), val::size(7), rest::binary>>,
-            count,
-            shift,
-            %__MODULE__{} = data
-          ) do
-        count = count ||| val <<< shift
-        decode_column_count(rest, count, shift + 7, data)
-      end
-
-      def decode_row_count(
-            <<0::size(1), count::size(7), rest::binary>>,
-            value,
-            shift,
-            %__MODULE__{} = data
-          ) do
-        count = count ||| value <<< shift
-        decode_columns(rest, %{data | row_count: count})
-      end
-
-      def decode_row_count(<<1::size(1), count::size(7), rest::binary>>, value, shift, data) do
-        count = count ||| value <<< shift
-        decode_row_count(rest, count, shift + 7, data)
-      end
-
-      defp fix_up_block_info(accum) do
-        block_info =
-          case Enum.sort(accum) do
-            [] ->
-              BlockInfo.new()
-
-            [bucket_num: bucket_num] ->
-              %{BlockInfo.new() | bucket_num: bucket_num}
-
-            [is_overflow: is_overflow] ->
-              %{BlockInfo.new() | is_overflow: is_overflow}
-
-            [bucket_num: bucket_num, is_overflow: is_overflow] ->
-              %{BlockInfo.new() | bucket_num: bucket_num, is_overflow: is_overflow}
-          end
-
-        %__MODULE__{block_info: block_info}
-      end
-
-      defp decode_columns(<<rest::binary>>, %{column_count: column_count} = accum) do
-        decode_column(rest, column_count, [], [], [], accum)
-      end
-
-      defp decode_column(<<rest::binary>>, 0, data, names, types, accum) do
-        data = Enum.reverse(data)
-        names = Enum.reverse(names)
-        types = Enum.reverse(types)
-
-        column_meta =
-          names
-          |> Enum.zip(types)
-          |> Map.new()
-
-        accum = %{accum | data: data, column_meta: column_meta}
-        {:ok, accum, rest}
-      end
-
-      defp decode_column(<<rest::binary>>, remaining_columns, data, names, types, accum) do
-        decode_column_name(rest, remaining_columns, data, names, types, accum)
-      end
-
-      defp decode_column_name(
-             <<0::size(1), length::size(7), column_name::binary-size(length), rest::binary>>,
-             column_count,
-             data,
-             names,
-             types,
-             accum
-           ) do
-        decode_column_type(
-          rest,
-          column_count,
-          data,
-          [column_name | names],
-          types,
-          accum
-        )
-      end
-
-      defp decode_column_type(
-             <<0::size(1), length::size(7), type_name::binary-size(length), rest::binary>>,
-             column_count,
-             data,
-             names,
-             types,
-             %{row_count: 0} = accum
-           ) do
-        decode_column(rest, column_count - 1, data, names, [type_name | types], accum)
-      end
-
-      defp decode_column_type(
-             <<0::size(1), length::size(7), type_name::binary-size(length), rest::binary>>,
-             column_count,
-             data,
-             names,
-             types,
-             accum
-           ) do
-        names = [type_name | names]
-
-        IO.puts("Type name: #{type_name}")
-
-        case type_name do
-          "Int64" ->
-            decode_i64_columns(rest, column_count, accum.row_count, data, names, types, accum)
-        end
+      defp read_column(type, n, rest, values) do
+        {:ok, string, rest} = Binary.decode(rest, @type_map[type])
+        read_column(type, n - 1, rest, [string | values])
       end
     end
 
