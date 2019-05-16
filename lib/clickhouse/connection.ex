@@ -1,5 +1,7 @@
 defmodule Clickhouse.Connection do
-  defstruct conn: nil, hello: nil, buffer: <<>>
+  defstruct conn: nil, hello: nil, client_info: nil, buffer: <<>>
+
+  alias Clickhouse.ClientInfo
   alias Clickhouse.Messages
 
   use DBConnection
@@ -19,7 +21,8 @@ defmodule Clickhouse.Connection do
     username = Keyword.get(opts, :username, "")
     password = Keyword.get(opts, :password, "")
 
-    with {:ok, conn_pid} <- :gen_tcp.connect(host, port, active: false, mode: :binary),
+    with {:ok, conn_pid} <-
+           :gen_tcp.connect(host, port, active: false, mode: :binary, nodelay: true),
          {:ok, state} <- do_handshake(conn_pid, database, username, password) do
       {:ok, state}
     else
@@ -65,8 +68,48 @@ defmodule Clickhouse.Connection do
     {:ok, state}
   end
 
-  def handle_execute(query, _params, _opts, state) do
-    IO.puts("EXEC #{inspect(query)}")
+  def handle_execute(query, _params, _opts, %{conn: conn} = state) do
+    alias Clickhouse.Block
+
+    query_packet =
+      Messages.Client.Query.encode(
+        query.statement,
+        state.client_info,
+        nil,
+        Clickhouse.Protocol.Compression.disabled()
+      )
+
+    block_packet = Messages.Client.Data.encode(Block.new())
+
+    :ok = :gen_tcp.send(conn, [query_packet, block_packet])
+
+    init_fn = fn ->
+      state.buffer
+    end
+
+    receive_packet_fn = fn unprocessed_bytes ->
+      IO.inspect(unprocessed_bytes, label: "remainder")
+
+      case receive_packet(conn, &Messages.Server.decode/1, unprocessed_bytes) do
+        {:ok, message, rest} ->
+          {[message], rest}
+
+        {:error, :incomplete} ->
+          {[], unprocessed_bytes}
+
+        {:error, :timeout} ->
+          {:halt, unprocessed_bytes}
+      end
+    end
+
+    close_fn = fn _ -> nil end
+
+    stream = Stream.resource(init_fn, receive_packet_fn, close_fn)
+
+    messages =
+      Enum.to_list(stream)
+      |> IO.inspect()
+
     {:ok, query, nil, state}
   end
 
@@ -98,7 +141,7 @@ defmodule Clickhouse.Connection do
     IO.puts("PING")
 
     with :ok <- :gen_tcp.send(conn, Messages.Client.Ping.encode()),
-         {:ok, message, rest} <- read_message(conn, &Messages.Server.decode/1, state.buffer) do
+         {:ok, message, rest} <- receive_packet(conn, &Messages.Server.decode/1, state.buffer) do
       IO.inspect(message)
       {:ok, %{state | buffer: rest}}
     end
@@ -109,22 +152,27 @@ defmodule Clickhouse.Connection do
 
     with :ok <- :gen_tcp.send(conn, hello_packet),
          {:ok, %Messages.Server.Hello{} = hello, buffer} <-
-           read_message(conn, &Messages.Server.decode/1, <<>>) do
-      state = %__MODULE__{hello: hello, buffer: buffer}
+           receive_packet(conn, &Messages.Server.decode/1, <<>>) do
+      state = %__MODULE__{conn: conn, hello: hello, buffer: buffer, client_info: ClientInfo.new()}
       {:ok, state}
     end
   end
 
-  defp read_message(conn, decode_fn, acc) do
-    {:ok, data} = :gen_tcp.recv(conn, 0)
-    all_data = acc <> data
+  defp receive_packet(conn, decode_fn, acc) do
+    case :gen_tcp.recv(conn, 0, 20) do
+      {:ok, data} ->
+        all_data = acc <> data
 
-    case decode_fn.(all_data) do
-      {:ok, _message, _buffer} = success ->
-        success
+        case decode_fn.(all_data) do
+          {:ok, _message, _buffer} = success ->
+            success
 
-      {:error, :incomplete} ->
-        read_message(conn, decode_fn, all_data)
+          {:error, :incomplete} ->
+            receive_packet(conn, decode_fn, all_data)
+        end
+
+      {:error, :timeout} = err ->
+        err
     end
   end
 end

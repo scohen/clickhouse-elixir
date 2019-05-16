@@ -46,4 +46,14 @@ defmodule Clickhouse.Protocol do
     # System logs of the query execution
     defmacro log, do: 10
   end
+
+  defmodule Compression do
+    def disabled do
+      0
+    end
+
+    def enabled do
+      1
+    end
+  end
 end

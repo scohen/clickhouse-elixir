@@ -30,16 +30,16 @@ defmodule Clickhouse.ClientInfo do
     %__MODULE__{
       client_hostname: List.to_string(hostname),
       client_name: "Clickhouse Elixir",
-      initial_address: "0.0.0.0",
+      initial_address: "0.0.0.0:0",
       initial_query_id: "",
       initial_user: "",
       interface: @interface_tcp,
       os_user: System.get_env("USER"),
-      patch: 3,
+      patch: 1,
       quota_key: "",
-      revision: 54416,
-      version_major: 19,
-      version_minor: 4
+      revision: 54406,
+      version_major: 18,
+      version_minor: 8
     }
   end
 
@@ -52,7 +52,7 @@ defmodule Clickhouse.ClientInfo do
   end
 
   def secondary_query do
-    @query_kind_secondary_query
+    @query_kind_no_query
   end
 
   defguard is_empty(kind) when kind == @query_kind_no_query
