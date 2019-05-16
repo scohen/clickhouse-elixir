@@ -152,11 +152,26 @@ defmodule Clickhouse.Messages do
         decode_columns(rest, row_count, n - 1, [{name, type, values} | data])
       end
 
+      defp read_column("Nullable(" <> type, row_count, rest, []) do
+        type = String.replace_suffix(type, ")", "")
+        <<null_map::binary-size(row_count), rest::binary>> = rest
+        {:ok, values, rest} = read_column(type, row_count, rest, [])
+
+        values =
+          values
+          |> Enum.with_index()
+          |> Enum.map(fn {value, index} ->
+            if :binary.at(null_map, index) == 0, do: value, else: nil
+          end)
+
+        {:ok, values, rest}
+      end
+
       defp read_column(_type, 0, rest, values), do: {:ok, Enum.reverse(values), rest}
 
       defp read_column(type, n, rest, values) do
-        {:ok, string, rest} = Binary.decode(rest, @type_map[type])
-        read_column(type, n - 1, rest, [string | values])
+        {:ok, value, rest} = Binary.decode(rest, @type_map[type])
+        read_column(type, n - 1, rest, [value | values])
       end
     end
 
