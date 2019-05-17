@@ -108,11 +108,14 @@ defmodule Clickhouse.Connection do
 
     close = fn _ -> nil end
 
-    messages =
-      Stream.resource(init_fn, parse, close)
-      |> Enum.to_list()
+    {time, messages} =
+      :timer.tc(fn ->
+        Stream.resource(init_fn, parse, close)
+        |> Enum.to_list()
+      end)
 
-    {:ok, query, messages, state}
+    IO.puts("Took #{time / 1000}ms")
+    {:ok, query, [], state}
   end
 
   def handle_fetch(_query, _cursor, _opts, state) do

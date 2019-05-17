@@ -7,7 +7,6 @@ defmodule ClickhouseTest do
   end
 
   test "it should allow you to query", %{client: client} do
-    assert {:ok, _, []} =
-             Clickhouse.query(client, "select id, event_name from events limit 500000")
+    assert {:ok, _, []} = Clickhouse.query(client, "select id, event_name from events")
   end
 end

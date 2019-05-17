@@ -1,4 +1,4 @@
-defmodule Clickhouse.ColumnMacros do
+defmodule Clickhouse.Messages.DataDecoders do
   defmacro __using__(_) do
     integer_decoders = [
       {:i64, quote(do: decoded :: little - signed - size(64))},
