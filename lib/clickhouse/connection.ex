@@ -83,40 +83,33 @@ defmodule Clickhouse.Connection do
 
     :ok = :gen_tcp.send(conn, [query_packet, block_packet])
 
-    init_fn = fn ->
-      state.buffer
+    stream_ended? = fn
+      buffer when byte_size(buffer) > 5 ->
+        binary_part(buffer, byte_size(buffer), -5) == <<255, 0, 0, 0, 5>>
+
+      _ ->
+        false
     end
 
-    receive_packet_fn = fn unprocessed_bytes ->
-      IO.inspect(unprocessed_bytes, label: "remainder")
+    init_fn = fn ->
+      {:ok, data} = read_until(conn, stream_ended?, state.buffer)
+      data
+    end
 
-      case receive_packet(conn, &Messages.Server.decode/1, unprocessed_bytes) do
-        {:ok, %Messages.Server.EndOfStream{}, rest} ->
-          {:halt, rest}
-
+    parse_message = fn data ->
+      case Messages.Server.decode(data) do
         {:ok, message, rest} ->
-          IO.inspect(message, label: "emitting")
           {[message], rest}
 
-        {:error, :incomplete} ->
-          IO.inspect("incomplete")
-          {[], unprocessed_bytes}
-
-        {:error, :timeout} ->
-          IO.inspect("timeout")
-          {:halt, unprocessed_bytes}
+        {:error, message} ->
+          {:halt, message}
       end
     end
 
-    close_fn = fn _ -> nil end
+    finalizer = fn _ -> :ok end
 
-    stream = Stream.resource(init_fn, receive_packet_fn, close_fn)
-
-    messages =
-      Enum.to_list(stream)
-      |> IO.inspect(label: "messages")
-
-    {:ok, query, nil, state}
+    messages = Stream.resource(init_fn, parse_message, finalizer) |> Enum.to_list()
+    {:ok, query, messages, state}
   end
 
   def handle_fetch(_query, _cursor, _opts, state) do
@@ -185,6 +178,15 @@ defmodule Clickhouse.Connection do
           {:error, :timeout} = err ->
             err
         end
+    end
+  end
+
+  defp read_until(conn, decider_fn, buffer) do
+    if decider_fn.(buffer) do
+      {:ok, buffer}
+    else
+      {:ok, data} = :gen_tcp.recv(conn, 0)
+      read_until(conn, decider_fn, buffer <> data)
     end
   end
 end
