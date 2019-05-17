@@ -179,10 +179,6 @@ defmodule Clickhouse.ColumnMacros do
         )
       end
 
-      defp decode_string_length_column(_, _, _, _, _, _, _, _, _) do
-        {:error, :incomplete}
-      end
-
       defp decode_string_value_column(
              <<rest::binary>>,
              length,

@@ -99,11 +99,6 @@ defmodule Clickhouse.Connection do
     parse = fn bytes_to_parse ->
       case Messages.Server.decode(bytes_to_parse) do
         {:ok, message, remainder} ->
-          case message do
-            %{data: [d | _]} -> IO.puts("Read #{Enum.count(d)} rows")
-            _ -> :ok
-          end
-
           {[message], remainder}
 
         {:error, :incomplete} ->
