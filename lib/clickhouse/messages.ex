@@ -120,7 +120,6 @@ defmodule Clickhouse.Messages do
 
       def decode(<<rest::binary>>) do
         {:ok, x, rest} = Binary.decode(rest, :string)
-        IO.inspect(rest, label: "start")
         decode_block_info_field(rest, [])
       end
 
@@ -151,37 +150,44 @@ defmodule Clickhouse.Messages do
       # Data decoding
 
       def decode_column_count(
-            <<0::size(1), val::size(7), rest::binary>>,
+            <<0::size(1), chunk::size(7), rest::binary>>,
             count,
             shift,
             %__MODULE__{} = data
           ) do
-        count = count ||| val <<< shift
+        count = count ||| chunk <<< shift
         decode_row_count(rest, 0, 0, %{data | column_count: count})
       end
 
       def decode_column_count(
-            <<1::size(1), val::size(7), rest::binary>>,
+            <<1::size(1), chunk::size(7), rest::binary>>,
             count,
             shift,
             %__MODULE__{} = data
           ) do
-        count = count ||| val <<< shift
+        count = count ||| chunk <<< shift
         decode_column_count(rest, count, shift + 7, data)
       end
 
       def decode_row_count(
-            <<0::size(1), count::size(7), rest::binary>>,
-            value,
+            <<0::size(1), chunk::size(7), rest::binary>>,
+            count,
             shift,
             %__MODULE__{} = data
           ) do
-        count = count ||| value <<< shift
+        count = count ||| chunk <<< shift
+
         decode_columns(rest, %{data | row_count: count})
       end
 
-      def decode_row_count(<<1::size(1), count::size(7), rest::binary>>, value, shift, data) do
-        count = count ||| value <<< shift
+      def decode_row_count(
+            <<1::size(1), chunk::size(7), rest::binary>>,
+            count,
+            shift,
+            data
+          ) do
+        count = count ||| chunk <<< shift
+
         decode_row_count(rest, count, shift + 7, data)
       end
 
@@ -216,7 +222,6 @@ defmodule Clickhouse.Messages do
         column_meta =
           names
           |> Enum.zip(types)
-          |> Map.new()
 
         accum = %{accum | data: data, column_meta: column_meta}
         {:ok, accum, rest}
@@ -250,27 +255,68 @@ defmodule Clickhouse.Messages do
              data,
              names,
              types,
-             %{row_count: 0} = accum
-           ) do
-        decode_column(rest, column_count - 1, data, names, [type_name | types], accum)
-      end
-
-      defp decode_column_type(
-             <<0::size(1), length::size(7), type_name::binary-size(length), rest::binary>>,
-             column_count,
-             data,
-             names,
-             types,
              accum
            ) do
-        names = [type_name | names]
+        types = [type_name | types]
 
-        IO.puts("Type name: #{type_name}")
+        case accum do
+          %{row_count: 0} ->
+            decode_column(rest, column_count - 1, data, names, [type_name | types], accum)
 
-        case type_name do
-          "Int64" ->
-            decode_i64_columns(rest, column_count, accum.row_count, data, names, types, accum)
+          %{row_count: row_count} ->
+            data = [[] | data]
+
+            case type_name do
+              "Int64" ->
+                decode_i64_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "Int32" ->
+                decode_i32_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "Int16" ->
+                decode_i16_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "Int8" ->
+                decode_i8_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "UInt64" ->
+                decode_u64_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "UInt32" ->
+                decode_u32_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "UInt16" ->
+                decode_u16_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "UInt8" ->
+                decode_u8_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "Float64" ->
+                decode_f64_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "Float32" ->
+                decode_f32_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "Float16" ->
+                decode_f16_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "String" ->
+                decode_string_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "Date" ->
+                decode_date_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "DateTime" ->
+                decode_datetime_columns(rest, column_count, row_count, data, names, types, accum)
+
+              "" ->
+                decode_column(rest, column_count - 1, [nil | data], names, types, accum)
+            end
         end
+      end
+
+      defp decode_column_type(_, _, _, _, _, _) do
+        {:error, :incomplete}
       end
     end
 
@@ -299,7 +345,6 @@ defmodule Clickhouse.Messages do
     end
 
     def decode(<<profile_info(), rest::binary>>) do
-      IO.puts("PROF INFO")
       Messages.Server.ProfileInfo.decode(rest)
     end
 
@@ -308,7 +353,6 @@ defmodule Clickhouse.Messages do
     end
 
     def decode(<<end_of_stream(), rest::binary>>) do
-      IO.puts("ENDO OF STREAM")
       {:ok, %Messages.Server.EndOfStream{}, rest}
     end
 

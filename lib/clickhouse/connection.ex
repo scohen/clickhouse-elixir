@@ -83,40 +83,41 @@ defmodule Clickhouse.Connection do
 
     :ok = :gen_tcp.send(conn, [query_packet, block_packet])
 
-    init_fn = fn ->
-      state.buffer
+    stream_ended? = fn
+      data when byte_size(data) >= 5 ->
+        :binary.part(data, {byte_size(data), -5}) == <<255, 0, 0, 0, 5>>
+
+      _ ->
+        false
     end
 
-    receive_packet_fn = fn unprocessed_bytes ->
-      IO.inspect(unprocessed_bytes, label: "remainder")
+    init_fn = fn ->
+      {:ok, bytes} = receive_until(conn, stream_ended?, state.buffer)
+      bytes
+    end
 
-      case receive_packet(conn, &Messages.Server.decode/1, unprocessed_bytes) do
-        {:ok, %Messages.Server.EndOfStream{}, rest} ->
-          {:halt, rest}
+    parse = fn bytes_to_parse ->
+      case Messages.Server.decode(bytes_to_parse) do
+        {:ok, message, remainder} ->
+          case message do
+            %{data: [d | _]} -> IO.puts("Read #{Enum.count(d)} rows")
+            _ -> :ok
+          end
 
-        {:ok, message, rest} ->
-          IO.inspect(message, label: "emitting")
-          {[message], rest}
+          {[message], remainder}
 
         {:error, :incomplete} ->
-          IO.inspect("incomplete")
-          {[], unprocessed_bytes}
-
-        {:error, :timeout} ->
-          IO.inspect("timeout")
-          {:halt, unprocessed_bytes}
+          {:halt, bytes_to_parse}
       end
     end
 
-    close_fn = fn _ -> nil end
-
-    stream = Stream.resource(init_fn, receive_packet_fn, close_fn)
+    close = fn _ -> nil end
 
     messages =
-      Enum.to_list(stream)
-      |> IO.inspect(label: "messages")
+      Stream.resource(init_fn, parse, close)
+      |> Enum.to_list()
 
-    {:ok, query, nil, state}
+    {:ok, query, messages, state}
   end
 
   def handle_fetch(_query, _cursor, _opts, state) do
@@ -148,7 +149,6 @@ defmodule Clickhouse.Connection do
 
     with :ok <- :gen_tcp.send(conn, Messages.Client.Ping.encode()),
          {:ok, message, rest} <- receive_packet(conn, &Messages.Server.decode/1, state.buffer) do
-      IO.inspect(message)
       {:ok, %{state | buffer: rest}}
     end
   end
@@ -164,9 +164,18 @@ defmodule Clickhouse.Connection do
     end
   end
 
+  def receive_until(conn, decider_fn, acc) do
+    if decider_fn.(acc) do
+      {:ok, acc}
+    else
+      {:ok, data} = :gen_tcp.recv(conn, 0)
+      receive_until(conn, decider_fn, acc <> data)
+    end
+  end
+
   defp receive_packet(conn, decode_fn, acc) do
     case decode_fn.(acc) do
-      {:ok, message, remainder} = success ->
+      {:ok, _message, _remainder} = success ->
         success
 
       {:error, :incomplete} ->

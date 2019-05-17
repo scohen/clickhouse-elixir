@@ -40,22 +40,22 @@ defmodule Clickhouse.PacketParser do
       end
 
       defp unquote(current_name)(
-             <<0::size(1), value::size(7), rest::bits>>,
+             <<0::size(1), chunk::size(7), rest::bits>>,
              result,
              shift,
              accum
            ) do
-        result = result ||| value <<< shift
+        result = result ||| chunk <<< shift
         unquote(next_function_name)(rest, [result | accum])
       end
 
       defp unquote(current_name)(
-             <<1::size(1), value::size(7), rest::bits>>,
+             <<1::size(1), chunk::size(7), rest::bits>>,
              result,
              shift,
              accum
            ) do
-        result = result ||| value <<< shift
+        result = result ||| chunk <<< shift
         unquote(current_name)(rest, result, shift + 7, accum)
       end
 
@@ -77,22 +77,22 @@ defmodule Clickhouse.PacketParser do
       end
 
       defp unquote(length_decoder_name)(
-             <<0::size(1), value::size(7), rest::bits>>,
+             <<0::size(1), chunk::size(7), rest::bits>>,
              result,
              shift,
              accum
            ) do
-        result = result ||| value <<< shift
+        result = result ||| chunk <<< shift
         unquote(value_decoder_name)(rest, result, accum)
       end
 
       defp unquote(length_decoder_name)(
-             <<1::size(1), value::size(7), rest::bits>>,
+             <<1::size(1), chunk::size(7), rest::bits>>,
              result,
              shift,
              accum
            ) do
-        result = result ||| value <<< shift
+        result = result ||| chunk <<< shift
         unquote(length_decoder_name)(rest, result, shift + 7, accum)
       end
 
