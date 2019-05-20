@@ -1,9 +1,9 @@
 defmodule Clickhouse.Connection do
   defstruct conn: nil, hello: nil, client_info: nil, buffer: <<>>
 
-  alias Clickhouse.ClientInfo
-  alias Clickhouse.Messages
+  alias Clickhouse.{ClientInfo, Messages, Protocol}
 
+  require Protocol.Server
   use DBConnection
 
   def checkin({:ok, state}) do
@@ -68,6 +68,53 @@ defmodule Clickhouse.Connection do
     {:ok, state}
   end
 
+  def stream_decider(%Clickhouse.Queries.Select{}) do
+    fn
+      <<Protocol.Server.data(), _::binary>> = data when byte_size(data) >= 5 ->
+        :binary.part(data, {byte_size(data), -5}) == <<255, 0, 0, 0, 5>>
+
+      <<Protocol.Server.end_of_stream()>> ->
+        true
+
+      <<Protocol.Server.exception(), _::bits>> = data ->
+        case Messages.Server.decode(data) do
+          {:ok, _, _} -> true
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  def stream_decider(%Clickhouse.Queries.Insert{}) do
+    fn data ->
+      case Messages.Server.decode(data) do
+        {:ok, _, _} ->
+          true
+
+        _ ->
+          false
+      end
+    end
+  end
+
+  def stream_decider(_) do
+    fn
+      <<Protocol.Server.end_of_stream()>> ->
+        true
+
+      <<Protocol.Server.exception(), _::bits>> = data ->
+        case Messages.Server.decode(data) do
+          {:ok, _, _} -> true
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
   def handle_execute(query, _params, _opts, %{conn: conn} = state) do
     alias Clickhouse.Block
 
@@ -83,13 +130,7 @@ defmodule Clickhouse.Connection do
 
     :ok = :gen_tcp.send(conn, [query_packet, block_packet])
 
-    stream_ended? = fn
-      data when byte_size(data) >= 5 ->
-        :binary.part(data, {byte_size(data), -5}) == <<255, 0, 0, 0, 5>>
-
-      _ ->
-        false
-    end
+    stream_ended? = stream_decider(query)
 
     init_fn = fn ->
       {:ok, bytes} = receive_until(conn, stream_ended?, state.buffer)
@@ -108,14 +149,25 @@ defmodule Clickhouse.Connection do
 
     close = fn _ -> nil end
 
-    {time, messages} =
+    {time, response} =
       :timer.tc(fn ->
         Stream.resource(init_fn, parse, close)
         |> Enum.to_list()
+        |> to_response()
       end)
 
     IO.puts("Took #{time / 1000}ms")
-    {:ok, query, [], state}
+
+    case response do
+      {:error, exception} ->
+        {:error, exception, state}
+
+      :ok ->
+        {:ok, query, :ok, state}
+
+      {:ok, rows} ->
+        {:ok, query, rows, state}
+    end
   end
 
   def handle_fetch(_query, _cursor, _opts, state) do
@@ -147,6 +199,7 @@ defmodule Clickhouse.Connection do
 
     with :ok <- :gen_tcp.send(conn, Messages.Client.Ping.encode()),
          {:ok, message, rest} <- receive_packet(conn, &Messages.Server.decode/1, state.buffer) do
+      IO.inspect(message)
       {:ok, %{state | buffer: rest}}
     end
   end
@@ -163,6 +216,8 @@ defmodule Clickhouse.Connection do
   end
 
   def receive_until(conn, decider_fn, acc) do
+    IO.inspect(acc, label: "Data", limit: :infinity)
+
     if decider_fn.(acc) do
       {:ok, acc}
     else
@@ -193,5 +248,40 @@ defmodule Clickhouse.Connection do
             err
         end
     end
+  end
+
+  defp to_response([%Messages.Server.EndOfStream{}]) do
+    :ok
+  end
+
+  defp to_response([%Messages.Server.Exception{} = ex]) do
+    {:error, ex}
+  end
+
+  defp to_response([]) do
+    {:ok, %{rows: [], row_count: 0, columns: []}}
+  end
+
+  defp to_response(messages) do
+    metadata = Enum.find(messages, &match?(%{row_count: 0}, &1))
+
+    rows =
+      for %Messages.Server.Data{data: data, row_count: row_count} <- messages,
+          row_count > 0 do
+        data
+        |> Enum.chunk_every(row_count)
+        |> Enum.zip()
+      end
+      |> List.flatten()
+
+    row_count =
+      for %Messages.Server.Data{row_count: count} <- messages do
+        count
+      end
+      |> Enum.sum()
+
+    columns = Enum.map(metadata.column_meta, &elem(&1, 0))
+
+    {:ok, %{rows: rows, row_count: row_count, columns: columns}}
   end
 end

@@ -14,17 +14,30 @@ defmodule Clickhouse.Queries do
       %__MODULE__{statement: query, opts: opts}
     end
   end
+
+  defmodule Modify do
+    defstruct statement: nil, params: [], opts: nil
+
+    def new(query, opts) do
+      %__MODULE__{statement: query, opts: opts}
+    end
+  end
 end
 
 defimpl DBConnection.Query, for: BitString do
-  @select_re ~r/select/i
+  @select_re ~r/^\s*select/i
+  @insert_re ~r/^\s*insert/i
 
   def parse(query, opts) do
     query_module =
       if Regex.match?(@select_re, query) do
         Clickhouse.Queries.Select
       else
-        Clickhouse.Queries.Insert
+        if Regex.match?(@insert_re, query) do
+          Clickhouse.Queries.Insert
+        else
+          Clickhouse.Queries.Modify
+        end
       end
 
     query_module.new(query, opts)
@@ -37,7 +50,29 @@ defimpl DBConnection.Query, for: BitString do
 end
 
 defimpl DBConnection.Query, for: Clickhouse.Queries.Select do
-  def parse(query, opts) do
+  def parse(query, _opts) do
+    query
+  end
+
+  def prepare(_, _), do: {:error, :not_preparable}
+  def encode(_, _, _), do: {:error, :not_encodeable}
+  def describe(query, _), do: query
+  def decode(_query, result, _), do: result
+end
+
+defimpl DBConnection.Query, for: Clickhouse.Queries.Insert do
+  def parse(query, _opts) do
+    query
+  end
+
+  def prepare(_, _), do: {:error, :not_preparable}
+  def encode(_, _, _), do: {:error, :not_encodeable}
+  def describe(query, _), do: query
+  def decode(_query, result, _), do: result
+end
+
+defimpl DBConnection.Query, for: Clickhouse.Queries.Modify do
+  def parse(query, _opts) do
     query
   end
 

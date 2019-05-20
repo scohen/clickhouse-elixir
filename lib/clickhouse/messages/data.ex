@@ -1,5 +1,5 @@
 defmodule Clickhouse.Messages.Server.Data do
-  @compile {:bin_opt_info, true}
+  #  @compile {:bin_opt_info, true}
   alias Clickhouse.{Binary, BlockInfo, Messages.DataDecoders}
 
   use Bitwise
@@ -104,6 +104,7 @@ defmodule Clickhouse.Messages.Server.Data do
   end
 
   defp decode_columns(<<rest::binary>>, %{column_count: column_count} = accum) do
+    IO.puts("DC COLS")
     decode_column(rest, column_count, [], [], [], accum)
   end
 
@@ -142,6 +143,29 @@ defmodule Clickhouse.Messages.Server.Data do
     )
   end
 
+  defp decode_column_type(
+         <<0::size(1), length::size(7), type_name::binary-size(length), rest::binary>>,
+         column_count,
+         data,
+         names,
+         types,
+         %{row_count: 0} = accum
+       ) do
+    decode_column(rest, column_count - 1, data, names, [type_name | types], accum)
+  end
+
+  defp decode_nullability(<<rest::binary>>, 0, nullability) do
+    {rest, Enum.reverse(nullability)}
+  end
+
+  defp decode_nullability(<<1, rest::binary>>, row_count, nullability) do
+    decode_nullability(rest, row_count - 1, [true | nullability])
+  end
+
+  defp decode_nullability(<<0, rest::binary>>, row_count, nullability) do
+    decode_nullability(rest, row_count - 1, [false | nullability])
+  end
+
   @decode_fns [
     {"Int64", :i64},
     {"Int32", :i32},
@@ -159,25 +183,16 @@ defmodule Clickhouse.Messages.Server.Data do
     {"DateTime", :datetime}
   ]
 
-  defp decode_column_type(
-         <<0::size(1), length::size(7), type_name::binary-size(length), rest::binary>>,
-         column_count,
-         data,
-         names,
-         types,
-         %{row_count: 0} = accum
-       ) do
-    decode_column(rest, column_count - 1, data, names, [type_name | types], accum)
-  end
-
   # We build the decoders with a macro because if we use a case statement to switch between them,
   # we don't get binary optimizations.
 
   for {ch_name, local_name} <- @decode_fns do
     decoder_name = :"decode_#{local_name}_columns"
+    null_ch_name = "Nullable(#{ch_name})"
+    null_decoder_name = :"decode_nullable_#{local_name}_columns"
 
     defp decode_column_type(
-           <<0::size(1), _length::size(7), unquote(ch_name), rest::binary>>,
+           <<_length::size(8), unquote(ch_name), rest::binary>>,
            column_count,
            data,
            names,
@@ -185,8 +200,22 @@ defmodule Clickhouse.Messages.Server.Data do
            accum
          ) do
       types = [unquote(ch_name) | types]
-      data = [[] | data]
+
       unquote(decoder_name)(rest, column_count, accum.row_count, data, names, types, accum)
+    end
+
+    defp decode_column_type(
+           <<_length::size(8), unquote(null_ch_name), rest::binary>>,
+           column_count,
+           data,
+           names,
+           types,
+           accum
+         ) do
+      types = [unquote(ch_name) | types]
+
+      {rest, null_map} = decode_nullability(rest, accum.row_count, [])
+      unquote(null_decoder_name)(rest, column_count, null_map, data, names, types, accum)
     end
   end
 end

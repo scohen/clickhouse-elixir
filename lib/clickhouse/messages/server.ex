@@ -52,29 +52,39 @@ defmodule Clickhouse.Messages.Server do
     Messages.Server.Hello.decode(rest)
   end
 
-  def decode(<<exception(), rest::binary>>) do
-    Messages.Server.Exception.decode(rest)
-  end
-
-  def decode(<<pong(), rest::binary>>) do
-    {:ok, %Messages.Server.Pong{}, rest}
-  end
-
-  def decode(<<profile_info(), rest::binary>>) do
-    Messages.Server.ProfileInfo.decode(rest)
-  end
-
   def decode(<<data(), rest::binary>>) do
     Messages.Server.Data.decode(rest)
   end
 
-  def decode(<<end_of_stream(), rest::binary>>) do
-    {:ok, %Messages.Server.EndOfStream{}, rest}
+  def decode(<<exception(), rest::binary>>) do
+    Messages.Server.Exception.decode(rest)
   end
 
   def decode(<<progress(), rest::binary>>) do
     Messages.Server.Progress.decode(rest)
   end
 
-  def decode(_), do: {:error, :incomplete}
+  def decode(<<pong(), rest::binary>>) do
+    {:ok, %Messages.Server.Pong{}, rest}
+  end
+
+  def decode(<<end_of_stream(), rest::binary>>) do
+    {:ok, %Messages.Server.EndOfStream{}, rest}
+  end
+
+  def decode(<<profile_info(), rest::binary>>) do
+    Messages.Server.ProfileInfo.decode(rest)
+  end
+
+  def decode(<<totals(), rest::binary>>) do
+    Messages.Server.Data.decode(rest)
+  end
+
+  def decode(<<extremes(), rest::binary>>) do
+    Messages.Server.Data.decode(rest)
+  end
+
+  def decode(_) do
+    {:error, :incomplete}
+  end
 end
