@@ -1,7 +1,14 @@
 defmodule Clickhouse.Connection do
-  defstruct conn: nil, hello: nil, client_info: nil, buffer: <<>>
+  defstruct conn: nil, hello: nil, client_info: nil, buffer: <<>>, decoded_packets: []
 
-  alias Clickhouse.{ClientInfo, Messages, Protocol}
+  alias Clickhouse.{
+    ClientInfo,
+    Messages,
+    Protocol,
+    Queries.Insert,
+    Queries.Select,
+    Queries.Modify
+  }
 
   require Protocol.Server
   use DBConnection
@@ -68,55 +75,44 @@ defmodule Clickhouse.Connection do
     {:ok, state}
   end
 
-  def stream_decider(%Clickhouse.Queries.Select{}) do
-    fn
-      <<Protocol.Server.data(), _::binary>> = data when byte_size(data) >= 5 ->
-        :binary.part(data, {byte_size(data), -5}) == <<255, 0, 0, 0, 5>>
+  def handle_execute(%Insert{} = insert, params, _opts, %{conn: conn} = state) do
+    alias Clickhouse.Block
+    IO.puts("insert")
 
-      <<Protocol.Server.end_of_stream()>> ->
-        true
+    query_packet =
+      Messages.Client.Query.encode(
+        insert.statement,
+        state.client_info,
+        nil,
+        Clickhouse.Protocol.Compression.disabled()
+      )
 
-      <<Protocol.Server.exception(), _::bits>> = data ->
-        case Messages.Server.decode(data) do
-          {:ok, _, _} -> true
-          _ -> false
-        end
+    IO.inspect(params, label: "params")
 
-      _ ->
-        false
-    end
-  end
+    block_packet = Messages.Client.Data.encode(Block.new())
 
-  def stream_decider(%Clickhouse.Queries.Insert{}) do
-    fn data ->
-      case Messages.Server.decode(data) do
-        {:ok, _, _} ->
-          true
+    :ok = :gen_tcp.send(conn, [query_packet, block_packet])
 
-        _ ->
-          false
-      end
-    end
-  end
+    {:ok, sample_block, new_state} = receive_packet(state)
 
-  def stream_decider(_) do
-    fn
-      <<Protocol.Server.end_of_stream()>> ->
-        true
+    data_iodata =
+      Block.new()
+      |> Map.put(:data, params)
+      |> Messages.Client.Data.encode()
+      |> IO.inspect()
 
-      <<Protocol.Server.exception(), _::bits>> = data ->
-        case Messages.Server.decode(data) do
-          {:ok, _, _} -> true
-          _ -> false
-        end
+    :ok = :gen_tcp.send(conn, data_iodata)
+    {:ok, [], new_state} = packet_stream(new_state)
 
-      _ ->
-        false
-    end
+    IO.inspect(sample_block, label: "Insert")
+
+    {:ok, insert, :ok, new_state}
   end
 
   def handle_execute(query, _params, _opts, %{conn: conn} = state) do
     alias Clickhouse.Block
+
+    IO.puts("exec")
 
     query_packet =
       Messages.Client.Query.encode(
@@ -130,43 +126,22 @@ defmodule Clickhouse.Connection do
 
     :ok = :gen_tcp.send(conn, [query_packet, block_packet])
 
-    stream_ended? = stream_decider(query)
+    {:ok, packets, new_state} = packet_stream(state)
 
-    init_fn = fn ->
-      {:ok, bytes} = receive_until(conn, stream_ended?, state.buffer)
-      bytes
-    end
+    IO.inspect(packets, label: "stream packets")
 
-    parse = fn bytes_to_parse ->
-      case Messages.Server.decode(bytes_to_parse) do
-        {:ok, message, remainder} ->
-          {[message], remainder}
+    case packets do
+      [] ->
+        {:ok, query, :ok, new_state}
 
-        {:error, :incomplete} ->
-          {:halt, bytes_to_parse}
-      end
-    end
+      messages ->
+        case to_response(messages) do
+          {:ok, response} ->
+            {:ok, query, response, new_state}
 
-    close = fn _ -> nil end
-
-    {time, response} =
-      :timer.tc(fn ->
-        Stream.resource(init_fn, parse, close)
-        |> Enum.to_list()
-        |> to_response()
-      end)
-
-    IO.puts("Took #{time / 1000}ms")
-
-    case response do
-      {:error, exception} ->
-        {:error, exception, state}
-
-      :ok ->
-        {:ok, query, :ok, state}
-
-      {:ok, rows} ->
-        {:ok, query, rows, state}
+          {:error, _} = err ->
+            {:ok, query, err, new_state}
+        end
     end
   end
 
@@ -198,20 +173,23 @@ defmodule Clickhouse.Connection do
     IO.puts("PING")
 
     with :ok <- :gen_tcp.send(conn, Messages.Client.Ping.encode()),
-         {:ok, message, rest} <- receive_packet(conn, &Messages.Server.decode/1, state.buffer) do
+         {:ok, message, new_state} <- receive_packet(state) do
       IO.inspect(message)
-      {:ok, %{state | buffer: rest}}
+      {:ok, new_state}
     end
   end
 
   defp do_handshake(conn, database, username, password) do
     hello_packet = Messages.Client.Hello.encode({1, 0, 0}, database, username, password)
+    state = %__MODULE__{conn: conn, buffer: <<>>}
 
     with :ok <- :gen_tcp.send(conn, hello_packet),
-         {:ok, %Messages.Server.Hello{} = hello, buffer} <-
-           receive_packet(conn, &Messages.Server.decode/1, <<>>) do
-      state = %__MODULE__{conn: conn, hello: hello, buffer: buffer, client_info: ClientInfo.new()}
+         {:ok, [%Messages.Server.Hello{} = hello], new_state} <- packet_stream(state) do
+      state = %{new_state | hello: hello, client_info: ClientInfo.new()}
       {:ok, state}
+    else
+      other ->
+        IO.inspect(other, "Failed")
     end
   end
 
@@ -226,33 +204,79 @@ defmodule Clickhouse.Connection do
     end
   end
 
-  defp receive_packet(conn, decode_fn, acc) do
-    case decode_fn.(acc) do
-      {:ok, _message, _remainder} = success ->
-        success
+  @valid_packets [
+    Messages.Server.Data,
+    Messages.Server.Progress
+  ]
+  def packet_stream(state) do
+    packet_stream(:cont, state, [])
+  end
 
-      {:error, :incomplete} ->
-        case :gen_tcp.recv(conn, 0) do
-          {:ok, data} ->
-            all_data = acc <> data
+  def packet_stream(:halt, new_state, packets) do
+    {:ok, Enum.reverse(packets), new_state}
+  end
 
-            case decode_fn.(all_data) do
-              {:ok, _message, _buffer} = success ->
-                success
+  def packet_stream(:cont, state, accum) do
+    case receive_packet(state) do
+      {:ok, %packet_module{} = packet, new_state} when packet_module in @valid_packets ->
+        IO.puts("Adding #{inspect(packet)} to the stream")
+        packet_stream(:cont, new_state, [packet | accum])
 
-              {:error, :incomplete} ->
-                receive_packet(conn, decode_fn, all_data)
-            end
+      {:ok, %Messages.Server.Exception{} = packet, new_state} ->
+        packet_stream(:halt, new_state, [packet | accum])
 
-          {:error, :timeout} = err ->
-            err
-        end
+      {:ok, %Messages.Server.EndOfStream{}, new_state} ->
+        packet_stream(:halt, new_state, accum)
+
+      {:ok, %Messages.Server.Hello{} = packet, new_state} ->
+        packet_stream(:halt, new_state, [packet | accum])
+
+      {:ok, _ignored_packet, new_state} ->
+        packet_stream(:cont, new_state, accum)
     end
   end
 
-  defp to_response([%Messages.Server.EndOfStream{}]) do
-    :ok
+  defp receive_packet(%{decoded_packets: [], conn: conn, buffer: buffer} = state) do
+    case Messages.Server.decode(buffer) do
+      {:ok, %packet_module{} = packet, remainder} ->
+        IO.puts("Got it #{packet_module}")
+        {:ok, packet, %{state | buffer: remainder}}
+
+      {:error, :incomplete} ->
+        {:ok, data} = :gen_tcp.recv(conn, 0)
+        IO.puts("incomplete")
+        receive_packet(%{state | buffer: buffer <> data})
+    end
   end
+
+  # defp receive_packet(%{decoded_packets: [packet | rest]} = state) do
+  #   {:ok, packet, %{state | decoded_packets: rest}}
+  # end
+
+  # defp receive_packet(conn, decode_fn, acc) do
+  #   case decode_fn.(acc) do
+  #     {:ok, _message, _remainder} = success ->
+  #       success
+
+  #     {:error, :incomplete} ->
+  #       case :gen_tcp.recv(conn, 0) do
+  #         {:ok, data} ->
+  #           all_data = acc <> data
+
+  #           case decode_fn.(all_data) do
+  #             {:ok, _message, _buffer} = success ->
+  #               success
+
+  #             {:error, :incomplete} ->
+  #               IO.inspect(acc, label: "incomplete")
+  #               receive_packet(conn, decode_fn, all_data)
+  #           end
+
+  #         {:error, :timeout} = err ->
+  #           err
+  #       end
+  #   end
+  # end
 
   defp to_response([%Messages.Server.Exception{} = ex]) do
     {:error, ex}

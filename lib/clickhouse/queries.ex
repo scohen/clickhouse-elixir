@@ -55,7 +55,7 @@ defimpl DBConnection.Query, for: Clickhouse.Queries.Select do
   end
 
   def prepare(_, _), do: {:error, :not_preparable}
-  def encode(_, _, _), do: {:error, :not_encodeable}
+  def encode(_, params, _), do: params
   def describe(query, _), do: query
   def decode(_query, result, _), do: result
 end
@@ -66,7 +66,7 @@ defimpl DBConnection.Query, for: Clickhouse.Queries.Insert do
   end
 
   def prepare(_, _), do: {:error, :not_preparable}
-  def encode(_, _, _), do: {:error, :not_encodeable}
+  def encode(_query, params, _opts), do: params
   def describe(query, _), do: query
   def decode(_query, result, _), do: result
 end
@@ -77,7 +77,7 @@ defimpl DBConnection.Query, for: Clickhouse.Queries.Modify do
   end
 
   def prepare(_, _), do: {:error, :not_preparable}
-  def encode(_, _, _), do: {:error, :not_encodeable}
+  def encode(_, params, _), do: params
   def describe(query, _), do: query
   def decode(_query, result, _), do: result
 end

@@ -104,7 +104,6 @@ defmodule Clickhouse.Messages.Server.Data do
   end
 
   defp decode_columns(<<rest::binary>>, %{column_count: column_count} = accum) do
-    IO.puts("DC COLS")
     decode_column(rest, column_count, [], [], [], accum)
   end
 
